@@ -56,6 +56,7 @@ if not data.empty:
     plt.ylabel("Amplitude")
     plt.grid()
     plt.show()
+    print("Hakan Hamza Commit denemesi")
 
 else:
     print(f"No data available for ticker: {ticker}")
