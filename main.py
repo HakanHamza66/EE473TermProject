@@ -5,9 +5,11 @@ from scipy.signal import butter, filtfilt
 from scipy.fft import fft, fftfreq
 import numpy as np
 from pandas.plotting import autocorrelation_plot
-from numpy.polynomial.polynomial import Polynomial
+from scipy.signal import freqz
+import pywt
+
 # Step 1: Fetch stock data
-ticker = "AMZN"  # Example: Apple Inc.
+ticker = "TTRAK.IS"  # Example: Apple Inc.
 data = yf.download(ticker, start="2020-01-01", end="2024-01-01")
 
 # Ensure data is not empty
@@ -57,70 +59,122 @@ if not data.empty:
     plt.ylabel("Amplitude")
     plt.grid()
     plt.show()
-    # Step 1: Calculate SMA_50 and SMA_200
-    data['SMA_50'] = data['Close'].rolling(window=50).mean()
-    data['SMA_200'] = data['Close'].rolling(window=200).mean()
 
-    # Step 2: Identify crossovers
-    data['Golden_Cross'] = (data['SMA_50'] > data['SMA_200']) & (data['SMA_50'].shift(1) <= data['SMA_200'].shift(1))
-    data['Death_Cross'] = (data['SMA_50'] < data['SMA_200']) & (data['SMA_50'].shift(1) >= data['SMA_200'].shift(1))
-
-    # Step 3: Plot the results
-    plt.figure(figsize=(14, 7))
-    plt.plot(data['Close'], label="Close Price", color='blue')
-    plt.plot(data['SMA_50'], label="50-Day SMA", color='orange')
-    plt.plot(data['SMA_200'], label="200-Day SMA", color='green')
-
-    # Highlight Golden Cross and Death Cross points
-    plt.scatter(data.index[data['Golden_Cross']], data['Close'][data['Golden_Cross']], label='Golden Cross', marker='^',
-                color='gold', s=100)
-    plt.scatter(data.index[data['Death_Cross']], data['Close'][data['Death_Cross']], label='Death Cross', marker='v',
-                color='red', s=100)
-
-    plt.title("Moving Averages/ Golden and Dead Crosses")
-    plt.xlabel("Date")
-    plt.ylabel("Price")
-    plt.legend()
-    plt.grid()
-    plt.show()
-
-    # Step 4: Print the detected points
-    golden_cross_points = data[data['Golden_Cross']]
-    death_cross_points = data[data['Death_Cross']]
-
-    autocorrelation_plot(data['Normalized_Close'])
-    plt.title("Autocorrelation of Normalized Close Prices")
-    plt.show()
+    # Step 8: Generate Predictions and Compare with Real Data
     # Step 1: Extract time and normalized close prices
     data['Days'] = np.arange(len(data))  # Create time index as days
     x = data['Days'].values
     y = data['Normalized_Close'].values
 
     # Step 2: Fit a polynomial regression model (degree can be adjusted)
-    degree = 5 # Degree of the polynomial
+    degree = 5
     coefs = np.polyfit(x, y, degree)
     poly = np.poly1d(coefs)
 
     # Step 3: Generate future points for extrapolation
-    future_days = 30 # Predict 30 days into the future
+    future_days = 300 # Predict 90 days into the future
     x_future = np.arange(len(data) + future_days)
-    y_future = poly(x_future)
+    # Extract the last known value
+    last_original_value = data['Normalized_Close'].iloc[-1]
 
-    # Step 4: Plot original and extrapolated data
-    plt.figure(figsize=(14, 7))
-    plt.plot(data.index, data['Normalized_Close'], label="Normalized Close Prices")
-    plt.plot(pd.date_range(data.index[-1], periods=future_days + 1, freq='D')[1:], y_future[len(data):],
-             label="Extrapolated Future Prices", linestyle='dashed', color='red')
-    plt.title("Stock Price Extrapolation using Polynomial Regression")
-    plt.xlabel("Date")
-    plt.ylabel("Normalized Close Prices")
-    plt.legend()
-    plt.grid()
-    plt.show()
+    # Generate raw predictions
+    y_future_raw = poly(x_future)
 
-    # Print extrapolated future values
-    future_dates = pd.date_range(data.index[-1], periods=future_days + 1, freq='D')[1:]
-    predictions = pd.DataFrame({'Date': future_dates, 'Predicted_Normalized_Close': y_future[len(data):]})
-    print(predictions)
+    # Align future predictions with the last original value
+    y_future = y_future_raw + (last_original_value - y_future_raw[len(data)])
+
+    # Create a future date range
+    future_dates = pd.date_range(start=data.index[-1], periods=future_days + 1, freq='D')[1:]
+
+    # Combine original and predicted data
+    all_dates = data.index.append(future_dates)
+    all_normalized_values = np.concatenate([data['Normalized_Close'].values, y_future[len(data):]])
+
+    # Fetch actual data for the prediction range
+    actual_future_data = yf.download(ticker, start=future_dates[0].strftime('%Y-%m-%d'), end=future_dates[-1].strftime('%Y-%m-%d'))
+
+    if not actual_future_data.empty:
+        actual_future_data['Normalized_Close'] = (actual_future_data['Close'] - data['Close'].mean()) / data['Close'].std()
+
+        # Plot the historical, predicted, and actual future data
+        plt.figure(figsize=(14, 7))
+        plt.plot(data.index, data['Normalized_Close'], label="Historical Normalized Close Prices")
+        plt.plot(future_dates, y_future[len(data):], label="Extrapolated Future Prices", linestyle='dashed', color='red')
+        plt.plot(actual_future_data.index, actual_future_data['Normalized_Close'], label="Actual Future Prices", color='green')
+        plt.title("Stock Price Extrapolation with Real Data Comparison")
+        plt.xlabel("Date")
+        plt.ylabel("Normalized Close Prices")
+        plt.legend()
+        plt.grid()
+        plt.show()
+        predictions = pd.DataFrame({
+            'Date': future_dates,
+            'Predicted_Normalized_Close': y_future[len(data):]
+        })
+        predictions.set_index('Date', inplace=True)
+        predictions['Actual_Normalized_Close'] = actual_future_data['Normalized_Close'].reindex(predictions.index)
+
+        print(predictions)
+    else:
+        print("No actual data available for the prediction range.")
+
+    # Step 9: Wavelet Transform for Future Prediction
+    def wavelet_transform_prediction(data, wavelet='db4', level=4, future_days=90):
+        # Step 1: Perform Discrete Wavelet Transform (DWT)
+        coeffs = pywt.wavedec(data, wavelet, level=level)
+
+        # Reconstruct the trend from approximation coefficients
+        reconstructed_trend = pywt.waverec([coeffs[0]] + [np.zeros_like(c) for c in coeffs[1:]], wavelet)
+
+        # Extend trend for future prediction
+        x = np.arange(len(reconstructed_trend))
+        future_x = np.arange(len(reconstructed_trend) + future_days)
+
+        # Fit a polynomial model to the trend
+        poly_coefs = np.polyfit(x, reconstructed_trend, 3)  # Degree can be adjusted
+        poly_model = np.poly1d(poly_coefs)
+
+        # Predict future trend
+        future_trend = poly_model(future_x)
+
+        return reconstructed_trend, future_trend[-future_days:]  # Return both reconstructed trend and future predictions
+
+    # Perform Wavelet Transform Prediction
+    reconstructed_trend, future_trend = wavelet_transform_prediction(normalized_close, future_days=future_days)
+
+    # Step 10: Generate Future Dates and Combine Results
+    future_dates_wavelet = pd.date_range(start=data.index[-1], periods=len(future_trend) + 1, freq='D')[1:]
+
+    # Fetch actual data for the prediction range (Wavelet)
+    actual_wavelet_future_data = yf.download(ticker, start=future_dates_wavelet[0].strftime('%Y-%m-%d'), end=future_dates_wavelet[-1].strftime('%Y-%m-%d'))
+
+    if not actual_wavelet_future_data.empty:
+        actual_wavelet_future_data['Normalized_Close'] = (actual_wavelet_future_data['Close'] - data['Close'].mean()) / data['Close'].std()
+
+        # Plot Historical Data with Wavelet Prediction and Actual Data
+        plt.figure(figsize=(14, 7))
+        plt.plot(data.index, reconstructed_trend[:len(data)], label="Reconstructed Trend (Wavelet)")
+        plt.plot(data.index, data['Normalized_Close'], label="Historical Normalized Close Prices", alpha=0.6)
+        plt.plot(future_dates_wavelet, future_trend, label="Wavelet Transform Prediction", linestyle='dotted', color='purple')
+        plt.plot(actual_wavelet_future_data.index, actual_wavelet_future_data['Normalized_Close'], label="Actual Future Prices (Wavelet)", color='orange')
+        plt.title("Stock Price Prediction using Wavelet Transform with Real Data")
+        plt.xlabel("Date")
+        plt.ylabel("Normalized Close Prices")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+        # Combine Wavelet Predictions with Actual Data for Comparison
+        wavelet_predictions = pd.DataFrame({
+            'Date': future_dates_wavelet,
+            'Wavelet_Predicted_Normalized_Close': future_trend
+        })
+        wavelet_predictions.set_index('Date', inplace=True)
+        wavelet_predictions['Actual_Normalized_Close'] = actual_wavelet_future_data['Normalized_Close'].reindex(wavelet_predictions.index)
+
+        print(wavelet_predictions)
+    else:
+        print("No actual data available for the wavelet prediction range.")
+
 else:
     print(f"No data available for ticker: {ticker}")
